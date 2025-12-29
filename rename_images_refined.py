@@ -24,77 +24,25 @@ easyocr_reader = easyocr.Reader(['en'], gpu=True)  # Set gpu=True if you have CU
 
 def extract_equipment_type(text):
     """
-    Equipment detection with priority to avoid false positives.
-    Order: Booster Pump > Transfer Pump > Hosereel > Fire Extinguisher > Others
-    Handles split phrases and OCR noise.
+    Extract equipment type by matching ONLY uppercase standalone abbreviations:
+      BP, TP, PT, HR, FE, RHE
+    Priority order: BP > TP > PT > HR > FE > RHE
+    Uses case-sensitive word boundaries to avoid false matches from words like 'Fern'.
     """
-    t = text.lower().strip()
-
-    # === STEP 1: Check for BOOSTER PUMP FIRST (highest priority) ===
-    if re.search(r'\bbooster\s*pump\b', t):
+    if re.search(r'\bBP\b', text):
         return 'bp'
-    # Allow up to 10 words between "booster" and "pump"
-    if re.search(r'\bbooster\b(?:\s+\w+){0,10}\s+\bpump\b', t):
-        return 'bp'
-    # Match "BP" only if not part of "HR" or "FE"
-    if re.search(r'\bbp\b', t) and not re.search(r'\bhr\b|\bfe\b', t):
-        return 'bp'
-    # Partial match (only if not part of "fire extinguisher")
-    if 'booster pump' in t and 'fire extinguisher' not in t:
-        return 'bp'
-
-    # === STEP 2: Check for TRANSFER PUMP (second priority) ===
-    if re.search(r'\btransfer\s*pump\b', t):
+    elif re.search(r'\bTP\b', text):
         return 'tp'
-    # Allow up to 10 words between "transfer" and "pump"
-    if re.search(r'\btransfer\b(?:\s+\w+){0,10}\s+\bpump\b', t):
-        return 'tp'
-    # Allow "pump" before "transfer"
-    if re.search(r'\bpump\b(?:\s+\w+){0,10}\s+\btransfer\b', t):
-        return 'tp'
-    # Match "TP" only if not part of "HR" or "FE"
-    if re.search(r'\btp\b', t) and not re.search(r'\bhr\b|\bfe\b', t):
-        return 'tp'
-    # Partial match (only if not part of "hosereel" or "fire extinguisher")
-    if 'transfer pump' in t and 'hosereel' not in t and 'fire extinguisher' not in t:
-        return 'tp'
-
-    # === STEP 3: Check for HOSEREEL (third priority) ===
-    if re.search(r'\bhosereel\b', t):
-        return 'hr'
-    # Match "HR" only if not part of "BP" or "TP"
-    if re.search(r'\bhr\b', t) and not re.search(r'\bbp\b|\btp\b', t):
-        return 'hr'
-    # Partial match (only if not part of "fire extinguisher" or "transfer pump")
-    if 'hosereel' in t and 'fire extinguisher' not in t and 'transfer pump' not in t:
-        return 'hr'
-
-    # === STEP 4: Check for FIRE EXTINGUISHER (last resort) ===
-    if re.search(r'\bfire\s*extinguisher\b', t):
-        return 'fe'
-    # Match "FE" only if not part of "BP" or "TP"
-    if re.search(r'\bfe\b', t) and not re.search(r'\bbp\b|\btp\b', t):
-        return 'fe'
-    # Partial match (only if not part of "hosereel" or "transfer pump")
-    if 'fire extinguisher' in t and 'hosereel' not in t and 'transfer pump' not in t:
-        return 'fe'
-
-    # === STEP 5: Check for ABBREVIATIONS (fallback) ===
-    if 'bp' in t and 'fe' not in t and 'tp' not in t and 'hr' not in t:
-        return 'bp'
-    if 'tp' in t and 'fe' not in t and 'hr' not in t:
-        return 'tp'
-    if 'hr' in t and 'fe' not in t and 'bp' not in t and 'tp' not in t:
-        return 'hr'
-    if 'fe' in t and 'hr' not in t and 'bp' not in t and 'tp' not in t:
-        return 'fe'
-    if 'rhe' in t:
-        return 'rhe'
-    if 'pt' in t:
+    elif re.search(r'\bPT\b', text):
         return 'pt'
-
-    # === DEFAULT ===
-    return 'other'
+    elif re.search(r'\bHR\b', text):
+        return 'hr'
+    elif re.search(r'\bFE\b', text):
+        return 'fe'
+    elif re.search(r'\bRHE\b', text):
+        return 'rhe'
+    else:
+        return 'other'
 
 def parse_date_from_text(text):
     """
@@ -294,67 +242,18 @@ def extract_info_from_ocr(ocr_text):
 
     return None, None, date_str
 
-def process_image(src_path, dest_dir, failed_dir):
-    original_name = os.path.basename(src_path)
-    try:
-        # === STEP 1: Watermark OCR (for ML input) ===
-        cropped_img = crop_watermark_precise(src_path)
-        watermark_results = easyocr_reader.readtext(cropped_img, detail=0)
-        watermark_ocr = " ".join(watermark_results)
-        print(f"[Watermark OCR] {original_name} → {repr(watermark_ocr)}")
-
-        # === STEP 2: Full Image OCR (our ground truth source) ===
-        full_img = cv2.imread(src_path)
-        if full_img is None:
-            raise ValueError(f"Failed to load image: {src_path}")
-        full_results = easyocr_reader.readtext(full_img, detail=0, width_ths=0.7, height_ths=0.7)
-        full_ocr = " ".join(full_results)
-        print(f"[Full OCR] → {repr(full_ocr)}")
-
-        # === STEP 3: Extract ground truth from full OCR ===
-        block_gt, road_gt, date_gt, equipment_gt = extract_ground_truth_from_full_ocr(full_ocr)
-
-        # If we can't extract, mark as failure
-        if not block_gt or not road_gt:
-            print(f"⚠️ Failed to extract ground truth from full OCR: {original_name}")
-            shutil.copy2(src_path, os.path.join(failed_dir, original_name))
-            return
-
-        # === STEP 4: Save training pair ===
-        save_training_pair(original_name, watermark_ocr, block_gt, road_gt, equipment_gt, date_gt)
-
-        # === STEP 5: Use ground truth for renaming ===
-        date_part = date_gt if date_gt else "nodate"
-        name, ext = os.path.splitext(original_name)
-        new_name = f"{equipment_gt}_{block_gt}_{road_gt}_{date_part}_{name}{ext}"
-        dest_path = os.path.join(dest_dir, new_name)
-        shutil.copy2(src_path, dest_path)
-        print(f"✅ Saved → {new_name}")
-
-        # Log success for rule learning
-        log_success(original_name, watermark_ocr, block_gt, road_gt, equipment_gt, date_gt)
-
-        # Delete original
-        os.remove(src_path)
-        print(f"🗑️  Deleted original: {original_name}")
-
-    except Exception as e:
-        print(f"❌ Critical error on {original_name}: {e}")
-        shutil.copy2(src_path, os.path.join(failed_dir, original_name))
-
 def extract_ground_truth_from_full_ocr(full_ocr):
     """
     Extract block and road from full OCR text using heuristic rules.
-    This is our "ground truth" generator — used to train ML.
     Returns: (block, road, date_str, equipment)
     """
-    # Extract equipment FIRST (before text cleaning affects it)
+    # Extract equipment FIRST using uppercase-only logic
     equipment = extract_equipment_type(full_ocr)
     
     # Extract date
     date_str = parse_date_from_text(full_ocr)
 
-    # Clean text (preserve original for equipment detection)
+    # Clean text for address parsing (but keep original for equipment)
     text = full_ocr.strip()
     text = re.sub(r'[vV]', '/', text)
     text = re.sub(r'[Oo]', '0', text)
@@ -362,25 +261,18 @@ def extract_ground_truth_from_full_ocr(full_ocr):
     text = re.sub(r'[€¢£]', '0', text)
     text = re.sub(r'\s+', ' ', text)  # Normalize spaces
 
-    # === IMPROVED: Look for RHE in original text (not cleaned) ===
-    if 'rhe' in full_ocr.lower():
-        equipment = 'rhe'
-
-    # === IMPROVED: More specific block patterns (prioritize 3-digit blocks over 4-digit years) ===
+    # === Block and road extraction patterns ===
     block_patterns = [
-        # Most specific: 3-digit block with letter near Yishun
-        r'(\d{3}[A-Za-z])\s+Yishun',  # "381C Yishun"
-        r'Yishun.*?(\d{3}[A-Za-z])\s+',  # "Yishun...381C"
-        r'(Yishun\s+[A-Za-z0-9\s]{2,?})\s+(\d{3}[A-Za-z])',  # "Yishun Glen 381C"
-        r'(\d{3}[A-Za-z])\s+(Yishun\s+[A-Za-z0-9\s]{2,?})',  # "381C Yishun Glen"
-        r'(Yishun\s+[A-Za-z0-9\s]{2,?})[,\s]+(\d{3}[A-Za-z])',  # "Yishun Glen, 381C"
-        
-        # Less specific: Any block pattern
-        r'Blk\s*(\d{2,4}[A-Za-z]?)',  # "Blk 462A"
-        r'(\d{2,4}[A-Za-z]?)\s+Yishun',  # "462A Yishun"
-        r'Yishun.*?(\d{2,4}[A-Za-z]?)\s+',  # "Yishun...462A"
-        r'(Yishun\s+[A-Za-z0-9\s]{2,?})\s+(\d{2,4}[A-Za-z]?)',  # "Yishun Ave 462A"
-        r'(\d{2,4}[A-Za-z]?)\s+(Yishun\s+[A-Za-z0-9\s]{2,?})',  # "462A Yishun Ave"
+        r'(\d{3}[A-Za-z])\s+Yishun',
+        r'Yishun.*?(\d{3}[A-Za-z])\s+',
+        r'(Yishun\s+[A-Za-z0-9\s]{2,})\s+(\d{3}[A-Za-z])',
+        r'(\d{3}[A-Za-z])\s+(Yishun\s+[A-Za-z0-9\s]{2,})',
+        r'(Yishun\s+[A-Za-z0-9\s]{2,})[,\s]+(\d{3}[A-Za-z])',
+        r'Blk\s*(\d{2,4}[A-Za-z]?)',
+        r'(\d{2,4}[A-Za-z]?)\s+Yishun',
+        r'Yishun.*?(\d{2,4}[A-Za-z]?)\s+',
+        r'(Yishun\s+[A-Za-z0-9\s]{2,})\s+(\d{2,4}[A-Za-z]?)',
+        r'(\d{2,4}[A-Za-z]?)\s+(Yishun\s+[A-Za-z0-9\s]{2,})',
     ]
 
     for pattern in block_patterns:
@@ -388,7 +280,6 @@ def extract_ground_truth_from_full_ocr(full_ocr):
         if match:
             groups = match.groups()
             if len(groups) == 2:
-                # Pattern with block and road
                 if 'Yishun' in groups[0]:
                     road_candidate = groups[0]
                     block_candidate = groups[1]
@@ -396,9 +287,7 @@ def extract_ground_truth_from_full_ocr(full_ocr):
                     block_candidate = groups[0]
                     road_candidate = groups[1]
             else:
-                # Pattern with just block
                 block_candidate = groups[0]
-                # Look for road near this block
                 context_start = max(0, match.start() - 50)
                 context_end = min(len(text), match.end() + 50)
                 context = text[context_start:context_end]
@@ -408,45 +297,35 @@ def extract_ground_truth_from_full_ocr(full_ocr):
                 else:
                     road_candidate = "yishun"
             
-            # Clean block: only digits + optional letter
             block_clean = re.sub(r'[^0-9A-Za-z]', '', str(block_candidate))
             
-            # VALIDATION: Ensure it's not a 4-digit year
+            # Skip if looks like a year (2025, etc.)
             if len(block_clean) >= 4 and block_clean.isdigit():
-                # Skip if it looks like a year (2025, 2024, etc.)
                 if 2000 <= int(block_clean) <= 2099:
                     continue
             
             num_part = re.sub(r'[A-Za-z]', '', block_clean)
             
             if num_part.isdigit() and 100 <= int(num_part) <= 9999:
-                # Clean road
                 road_clean = clean_road_name(road_candidate) if 'Yishun' in str(road_candidate) else "yishun"
                 return block_clean.upper(), road_clean, date_str, equipment
 
-    # === IMPROVED: Look for postal code + block (avoid years) ===
+    # === Postal code fallback ===
     postal_match = re.search(r'\b(76[0-3]\d{3})\b', text)
     if postal_match:
         postal = postal_match.group(1)
         block_num = postal[-3:]
-        
-        # Look for letter near postal code
         near_postal = text[postal_match.start()-50:postal_match.end()+50]
-        
-        # Look for block pattern near postal code (avoid years)
         block_near_postal = re.search(r'(\d{2,4}[A-Za-z]?)\s*Yishun', near_postal, re.IGNORECASE)
         if block_near_postal:
             block_candidate = block_near_postal.group(1)
             block_clean = re.sub(r'[^0-9A-Za-z]', '', block_candidate)
-            
-            # Skip if it looks like a year
             if len(block_clean) >= 4 and block_clean.isdigit():
                 if 2000 <= int(block_clean) <= 2099:
-                    block_clean = block_num + "B"  # Default if year detected
+                    block_clean = block_num + "B"
             else:
                 num_part = re.sub(r'[A-Za-z]', '', block_clean)
                 if num_part.isdigit() and 100 <= int(num_part) <= 9999:
-                    # Find road near this block
                     yishun_match = re.search(r'(Yishun\s+[A-Za-z0-9\s]{2,})', near_postal, re.IGNORECASE)
                     road_clean = clean_road_name(yishun_match.group(1)) if yishun_match else "yishun"
                     return block_clean.upper(), road_clean, date_str, equipment
@@ -473,3 +352,4 @@ if __name__ == "__main__":
         print(f"Processing: {filename}")
         src_path = os.path.join(SOURCE_DIR, filename)
         process_image(src_path, DEST_DIR, FAILED_DIR)
+        
